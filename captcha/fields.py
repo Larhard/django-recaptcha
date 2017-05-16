@@ -11,6 +11,9 @@ except ImportError:
 
 from django.core.exceptions import ValidationError
 from django.utils.translation import ugettext_lazy as _
+from django.utils import timezone
+
+import datetime
 
 from . import client
 from .constants import TEST_PUBLIC_KEY, TEST_PRIVATE_KEY
@@ -45,25 +48,40 @@ class ReCaptchaField(forms.CharField):
         self.required = True
         super(ReCaptchaField, self).__init__(*args, **kwargs)
 
-    def get_remote_ip(self):
+    def get_request(self):
         f = sys._getframe()
         while f:
             if 'request' in f.f_locals:
                 request = f.f_locals['request']
                 if request:
-                    remote_ip = request.META.get('REMOTE_ADDR', '')
-                    forwarded_ip = request.META.get('HTTP_X_FORWARDED_FOR', '')
-                    ip = remote_ip if not forwarded_ip else forwarded_ip
-                    return ip
+                    return request
             f = f.f_back
 
+    def get_remote_ip(self):
+        request = self.get_request()
+        if request:
+            remote_ip = request.META.get('REMOTE_ADDR', '')
+            forwarded_ip = request.META.get('HTTP_X_FORWARDED_FOR', '')
+            ip = remote_ip if not forwarded_ip else forwarded_ip
+            return ip
+
     def clean(self, values):
+        request = self.get_request()
+
         super(ReCaptchaField, self).clean(values[1])
         recaptcha_challenge_value = smart_unicode(values[0])
         recaptcha_response_value = smart_unicode(values[1])
 
+        timeout = getattr(settings, 'RECAPTCHA_TIMEOUT', 60)
+        if 'captcha_passed' in request.session and \
+                timezone.now().timestamp() - request.session['captcha_passed'] < timeout:
+            return values[0]
+
         if os.environ.get('RECAPTCHA_TESTING', None) == 'True' and \
                 recaptcha_response_value == 'PASSED':
+
+            if request:
+                request.session['captcha_passed'] = timezone.now().timestamp()
             return values[0]
 
         if not self.required:
@@ -84,4 +102,7 @@ class ReCaptchaField(forms.CharField):
             raise ValidationError(
                 self.error_messages['captcha_invalid']
             )
+
+        if request:
+            request.session['captcha_passed'] = timezone.now().timestamp()
         return values[0]
